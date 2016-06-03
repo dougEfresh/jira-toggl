@@ -123,13 +123,17 @@ func run(cmd *cobra.Command, args []string) {
 	for _, value := range results {
 		if value != nil && value.TimeEntry != nil {
 			table := tablewriter.NewWriter(os.Stdout)
-			table.SetHeader([]string{value.Subtask.Key, value.Subtask.Fields.Summary, value.Story.Fields.Summary})
+			table.SetHeader([]string{value.Subtask.Key, value.Subtask.Fields.Summary})
+			p := false
 			for _, te := range value.TimeEntry {
 				if te != nil {
-					table.Append([]string{value.Subtask.Key, value.Subtask.Fields.Summary, value.Story.Fields.Summary, te.Start.Format("Mon 02th"), strconv.FormatFloat(te.Duration, 'f', 2, 64)})
+					p = true
+					table.Append([]string{te.Start.Format("Mon 02th"), strconv.FormatFloat(float64(te.Duration), 'f', 2, 64)})
 				}
 			}
-			table.Render()
+			if p {
+				table.Render()
+			}
 		}
 	}
 
@@ -159,13 +163,7 @@ type Worker struct {
 }
 
 func (w *Worker) processIssue(jt *JiraToggl,cmd *cobra.Command) {
-	p := w.getTogglProject(jt.Subtask)
-	if p == nil {
-		p = w.getTogglProject(jt.Story)
-		if p == nil {
-			p = jt.DefaultProject
-		}
-	}
+
 
 	for _, wl := range jt.Worklogs {
 		if !strings.Contains(wl.Author.Name, w.user) {
@@ -242,7 +240,7 @@ func (w *Worker) getTimeEntry(wl *jira.Worklog, jt *JiraToggl) (*gtimeentry.Time
 	found := strings.Contains(wl.Comment, "-----tid:")
 	if !found {
 		fmt.Printf("No tid: in comment, creating new entry\n")
-		return w.addNew(wl, jt.Story, jt.Subtask), true
+		return w.addNew(wl, jt), true
 	}
 	for _, c := range strings.Split(wl.Comment, "\n") {
 		if !strings.Contains(wl.Comment, "-----tid:") {
@@ -269,7 +267,7 @@ func (w *Worker) getTimeEntry(wl *jira.Worklog, jt *JiraToggl) (*gtimeentry.Time
 		}
 
 		if update {
-			te = w.addNew(wl, jt.Story, jt.Subtask)
+			te = w.addNew(wl, jt)
 			te.Id = id
 		}
 		return te, update
@@ -277,13 +275,20 @@ func (w *Worker) getTimeEntry(wl *jira.Worklog, jt *JiraToggl) (*gtimeentry.Time
 	return nil, false
 }
 
-func (w *Worker) addNew(wl *jira.Worklog, issue *jira.Issue, subtask *jira.Issue) *gtimeentry.TimeEntry {
+func (w *Worker) addNew(wl *jira.Worklog, jt *JiraToggl) *gtimeentry.TimeEntry {
 	i := gtimeentry.TimeEntry{}
 	i.Start = time.Time(wl.Started)
 	i.Stop = i.Start.Add(time.Duration(wl.TimeSpentSeconds) * time.Second)
 	i.Duration = wl.TimeSpentSeconds
-	i.Pid = w.defaultProject.Id
-	i.Wid = w.defaultProject.WId
+	p := w.getTogglProject(jt.Subtask)
+	if p == nil {
+		p = w.getTogglProject(jt.Story)
+		if p == nil {
+			p = jt.DefaultProject
+		}
+	}
+	i.Pid = p.Id
+	i.Wid = p.WId
 	if len(w.workspace) > 0 {
 		id, err := strconv.ParseUint(w.workspace, 10, 64)
 		if err != nil {
@@ -292,10 +297,10 @@ func (w *Worker) addNew(wl *jira.Worklog, issue *jira.Issue, subtask *jira.Issue
 		i.Wid = id
 	}
 	i.CreatedWith = wl.Self
-	i.Description = fmt.Sprintf("%s - %s", subtask.Key, issue.Fields.Summary)
-	defaultTag := strings.Replace(fmt.Sprintf("INT_%s", issue.Fields.Type.Name), "INT_Story", "INT_Development", 1)
+	i.Description = fmt.Sprintf("%s - %s", jt.Subtask.Key, jt.Story.Fields.Summary)
+	defaultTag := strings.Replace(fmt.Sprintf("INT_%s", jt.Story.Fields.Type.Name), "INT_Story", "INT_Development", 1)
 	i.Tags = []string{defaultTag}
-	for _, value := range subtask.Fields.Labels {
+	for _, value := range jt.Subtask.Fields.Labels {
 		if strings.Contains(value, "toggl_tag=") {
 			i.Tags = []string{strings.Replace(value, "toggl_tag=", "", 1)}
 		}
