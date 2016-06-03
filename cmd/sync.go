@@ -48,7 +48,7 @@ var syncCmd = &cobra.Command{
 type JiraToggl struct {
 	Story *jira.Issue
 	Subtask *jira.Issue
-	TimeEntry *gtimeentry.TimeEntry
+	TimeEntry []*gtimeentry.TimeEntry
 	Epic *jira.Issue
 	Worklogs []*jira.Worklog
 	DefaultProject *gproject.Project
@@ -88,7 +88,6 @@ func run(cmd *cobra.Command, args []string) {
 		if value == nil {
 			continue
 		}
-		fmt.Printf("%+s\n",value.Key)
 		is, _, err := jc.Issue.Get(value.Key)
 		if err != nil {
 			panic(err)
@@ -101,30 +100,39 @@ func run(cmd *cobra.Command, args []string) {
 			Story: is,
 			DefaultProject: p,
 			Worklogs:  is.Fields.WorklogPage.Worklogs,
+			TimeEntry: make([]*gtimeentry.TimeEntry, 20, 100),
 		}
 		w.processIssue(process,cmd)
 		results = append(results,process)
 		for _, value := range is.Fields.SubTasks {
-			//fmt.Printf("%v\n",value)
 			st, _, _ := jc.Issue.Get(value.Key)
 			process = &JiraToggl{
 				Epic: epic,
 				Subtask: st,
 				Story: is,
 				DefaultProject: p,
-				Worklogs:  is.Fields.WorklogPage.Worklogs,
+				Worklogs:  st.Fields.WorklogPage.Worklogs,
+				TimeEntry: make([]*gtimeentry.TimeEntry, 20, 100),
 			}
+			w.processIssue(process,cmd)
 			results = append(results,process)
 		}
 	}
 	table := tablewriter.NewWriter(os.Stdout)
-	table.SetHeader([]string{"Jira", "Story", "Toggl"})
+	table.SetHeader([]string{"Jira", "Task", "Story", "Date", "Duration"})
 	for _, value := range results {
-		if value.TimeEntry != nil {
-			table.Append([]string{value.Story.Key, value.Subtask.Fields.Summary, strconv.FormatUint(value.TimeEntry.Duration,10)})
+		if value != nil && value.TimeEntry != nil {
+			table := tablewriter.NewWriter(os.Stdout)
+			table.SetHeader([]string{value.Subtask.Key, value.Subtask.Fields.Summary, value.Story.Fields.Summary})
+			for _, te := range value.TimeEntry {
+				if te != nil {
+					table.Append([]string{value.Subtask.Key, value.Subtask.Fields.Summary, value.Story.Fields.Summary, te.Start.Format("Mon 02th"), strconv.FormatFloat(te.Duration, 'f', 2, 64)})
+				}
+			}
+			table.Render()
 		}
 	}
-	table.Render()
+
 }
 
 func init() {
@@ -163,24 +171,28 @@ func (w *Worker) processIssue(jt *JiraToggl,cmd *cobra.Command) {
 		if !strings.Contains(wl.Author.Name, w.user) {
 			continue
 		}
-		fmt.Printf("-----Processing %s -------\n", jt.Subtask.Key)
+		fmt.Printf("-----Processing %s %s -------\n", jt.Subtask.Key, jt.Subtask.Fields.Summary)
 		te, update := w.getTimeEntry(wl, jt)
 		var err error
-		jt.TimeEntry = te
+
 		jt.Update = update
+		if !update {
+			jt.TimeEntry = append(jt.TimeEntry,te)
+			return
+		}
 		dryRun , _ := cmd.Flags().GetBool("dry-run")
 		if te.Id == 0 {
+			fmt.Printf("creating %+v\n", te)
 			if !dryRun {
-				fmt.Printf("updating %+v\n", te)
-				te, err = w.tc.TimeentryClient.Create(jt.TimeEntry)
+				te, err = w.tc.TimeentryClient.Create(te)
 			}
 		} else {
+			fmt.Printf("updating %+v\n", te)
 			if !dryRun {
-				fmt.Printf("updating %+v\n", te)
-				te, err = w.tc.TimeentryClient.Update(jt.TimeEntry)
+				te, err = w.tc.TimeentryClient.Update(te)
 			}
 		}
-		jt.TimeEntry = te
+		jt.TimeEntry = append(jt.TimeEntry,te)
 		if err != nil {
 			panic(err)
 		}
@@ -229,13 +241,14 @@ func (w *Worker) getTimeEntry(wl *jira.Worklog, jt *JiraToggl) (*gtimeentry.Time
 	tc := w.tc
 	found := strings.Contains(wl.Comment, "-----tid:")
 	if !found {
+		fmt.Printf("No tid: in comment, creating new entry\n")
 		return w.addNew(wl, jt.Story, jt.Subtask), true
 	}
 	for _, c := range strings.Split(wl.Comment, "\n") {
 		if !strings.Contains(wl.Comment, "-----tid:") {
 			continue
 		}
-		id, err := strconv.ParseUint(strings.Replace(strings.Replace(c, "-----tid:", "", 1), "----", "", 1), 10, 65)
+		id, err := strconv.ParseUint(strings.Replace(strings.Replace(c, "-----tid:", "", 1), "----", "", 1), 10, 64)
 		if err != nil {
 			panic(err)
 		}
@@ -246,10 +259,12 @@ func (w *Worker) getTimeEntry(wl *jira.Worklog, jt *JiraToggl) (*gtimeentry.Time
 		update := false
 		if wl.TimeSpentSeconds != te.Duration {
 			te.Duration = wl.TimeSpentSeconds
+			fmt.Printf("Duration is differ %s,%s\n",te.Duration, wl.TimeSpentSeconds)
 			update = true
 		}
 		if !time.Time(wl.Started).Equal(te.Start) {
 			te.Start = time.Time(wl.Started)
+			fmt.Printf("Start time is differ %s,%s\n",te.Start, wl.Started)
 			update = true
 		}
 
