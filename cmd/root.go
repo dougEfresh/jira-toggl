@@ -57,23 +57,19 @@ func init() {
 	RootCmd.PersistentFlags().BoolP("debug", "d", false, "debug")
 	RootCmd.PersistentFlags().StringP("token","t","","api token")
 	RootCmd.PersistentFlags().Uint32P("workspace", "w",0,"workspace id")
-	RootCmd.PersistentFlags().StringP("jira","j","","jira url")
+	RootCmd.PersistentFlags().StringP("jira-host","j","","jira url")
 	RootCmd.PersistentFlags().StringP("jql","q","","jql")
 	RootCmd.PersistentFlags().StringP("user","u","","username")
 	RootCmd.PersistentFlags().StringP("password","p","","jira password")
 	RootCmd.PersistentFlags().BoolP("dry-run","",false,"dry run")
 
-	viper.BindPFlag("toggl.token",RootCmd.PersistentFlags().Lookup("token"))
-	viper.BindPFlag("toggl.workspace",RootCmd.PersistentFlags().Lookup("workspace"))
-	viper.BindPFlag("jira.host",RootCmd.PersistentFlags().Lookup("jira"))
-	viper.BindPFlag("jira.jql",RootCmd.PersistentFlags().Lookup("jql"))
-	viper.BindPFlag("jira.user",RootCmd.PersistentFlags().Lookup("user"))
-	viper.BindPFlag("debug",RootCmd.PersistentFlags().Lookup("debug"))
+	viper.BindPFlag("jira-toggl.toggl.token",RootCmd.PersistentFlags().Lookup("token"))
+	viper.BindPFlag("jira-toggl.toggl.workspace",RootCmd.PersistentFlags().Lookup("workspace"))
+	viper.BindPFlag("jira-toggl.jira.host",RootCmd.PersistentFlags().Lookup("jira-host"))
+	viper.BindPFlag("jira-toggl.jira.jql",RootCmd.PersistentFlags().Lookup("jql"))
+	viper.BindPFlag("jira-toggl.jira.user",RootCmd.PersistentFlags().Lookup("user"))
 
 	RootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.jira-toggl.yaml)")
-	// Cobra also supports local flags, which will only run
-	// when this action is called directly.
-
 }
 
 // initConfig reads in config file and ENV variables if set.
@@ -90,6 +86,9 @@ func initConfig() {
 	if err := viper.ReadInConfig(); err == nil {
 		if d,_ := RootCmd.Flags().GetBool("debug"); d {
 			fmt.Println("Using config file:", viper.ConfigFileUsed())
+			for key, value := range viper.AllSettings() {
+				fmt.Printf("%s=%s\n",key,value)
+			}
 		}
 	}
 }

@@ -45,15 +45,26 @@ var syncCmd = &cobra.Command{
 	Run:   run,
 }
 
+type JiraToggl struct {
+	Story *jira.Issue
+	Subtask *jira.Issue
+	TimeEntry *gtimeentry.TimeEntry
+	Epic *jira.Issue
+	Worklogs []*jira.Worklog
+	DefaultProject *gproject.Project
+	Update bool
+}
+
 func run(cmd *cobra.Command, args []string) {
-	debugClient := &BasicClient{debug: viper.GetBool("debug")}
+	debug , _ := cmd.Flags().GetBool("debug")
+	debugClient := &BasicClient{debug: debug}
 	httpClient := &http.Client{Transport: debugClient}
-	jc, err := jira.NewClient(httpClient, viper.GetString("jira.host"))
+	jc, err := jira.NewClient(httpClient, viper.GetString("jira-toggl.jira.host"))
 	if err != nil {
 		panic(err)
 	}
-	logger := Debugger{Debug: viper.GetBool("debug")}
-	tc, err := gtoggl.NewClient(viper.GetString("toggl.token"), ghttp.SetTraceLogger(logger))
+	logger := Debugger{Debug: debug}
+	tc, err := gtoggl.NewClient(viper.GetString("jira-toggl.toggl.token"), ghttp.SetTraceLogger(logger))
 	if err != nil {
 		panic(err)
 	}
@@ -62,17 +73,17 @@ func run(cmd *cobra.Command, args []string) {
 		fmt.Fprintf(os.Stderr, "Need a password!\n")
 		os.Exit(-1)
 	}
-	_, err = jc.Authentication.AcquireSessionCookie(viper.GetString("jira.user"), p.Value.String())
+	_, err = jc.Authentication.AcquireSessionCookie(viper.GetString("jira-toggl.jira.user"), p.Value.String())
 	if err != nil {
 		panic(err)
 	}
 
-	w := &Worker{user: viper.GetString("jira.user"), jc: jc, tc: tc, debug: false, workspace: viper.GetString("toggl.workspace")}
-	sr, err := jc.Issue.Search(viper.GetString("jira.jql"))
+	w := &Worker{user: viper.GetString("jira-toggl.jira.user"), jc: jc, tc: tc, debug: false, workspace: viper.GetString("jira-toggl.toggl.workspace")}
+	sr, err := jc.Issue.Search(viper.GetString("jira-toggl.jira.jql"))
 	if err != nil {
 		panic(err)
 	}
-	results := make([]JiraToggl, 20, 100)
+	results := make([]*JiraToggl, 20, 100)
 	for _, value := range sr.Issues {
 		if value == nil {
 			continue
@@ -83,24 +94,34 @@ func run(cmd *cobra.Command, args []string) {
 			panic(err)
 		}
 		epic := w.getEpic(is)
-		w.defaultProject = w.getTogglProject(epic)
-		for _, value := range w.processIssue(is, is,cmd) {
-			results = append(results,value)
+		p := w.getTogglProject(epic)
+		process := &JiraToggl{
+			Epic: epic,
+			Subtask: is,
+			Story: is,
+			DefaultProject: p,
+			Worklogs:  is.Fields.WorklogPage.Worklogs,
 		}
+		w.processIssue(process,cmd)
+		results = append(results,process)
 		for _, value := range is.Fields.SubTasks {
 			//fmt.Printf("%v\n",value)
 			st, _, _ := jc.Issue.Get(value.Key)
-			for _, value := range w.processIssue(is, st,cmd) {
-				results = append(results,value)
+			process = &JiraToggl{
+				Epic: epic,
+				Subtask: st,
+				Story: is,
+				DefaultProject: p,
+				Worklogs:  is.Fields.WorklogPage.Worklogs,
 			}
-
+			results = append(results,process)
 		}
 	}
 	table := tablewriter.NewWriter(os.Stdout)
 	table.SetHeader([]string{"Jira", "Story", "Toggl"})
 	for _, value := range results {
-		if value.timeEntry != nil {
-			table.Append([]string{value.jira.Key, value.jira.Fields.Summary, strconv.FormatUint(value.timeEntry.Duration,10)})
+		if value.TimeEntry != nil {
+			table.Append([]string{value.Story.Key, value.Subtask.Fields.Summary, strconv.FormatUint(value.TimeEntry.Duration,10)})
 		}
 	}
 	table.Render()
@@ -129,50 +150,41 @@ type Worker struct {
 	workspace      string
 }
 
-type JiraToggl struct {
-	timeEntry *gtimeentry.TimeEntry
-	jira      *jira.Issue
-	worklog  *jira.Worklog
-}
-
-func (w *Worker) processIssue(issue *jira.Issue, subtask *jira.Issue,cmd *cobra.Command) []JiraToggl {
-	p := w.getTogglProject(subtask)
+func (w *Worker) processIssue(jt *JiraToggl,cmd *cobra.Command) {
+	p := w.getTogglProject(jt.Subtask)
 	if p == nil {
-		p = w.getTogglProject(issue)
+		p = w.getTogglProject(jt.Story)
 		if p == nil {
-			p = w.defaultProject
+			p = jt.DefaultProject
 		}
 	}
-	results := make([]JiraToggl, 20, 100)
-	for _, wl := range subtask.Fields.WorklogPage.Worklogs {
+
+	for _, wl := range jt.Worklogs {
 		if !strings.Contains(wl.Author.Name, w.user) {
 			continue
 		}
-		fmt.Printf("-----Processing %s -------\n", subtask.Key)
-		te, update := w.getTimeEntry(wl, issue, subtask)
+		fmt.Printf("-----Processing %s -------\n", jt.Subtask.Key)
+		te, update := w.getTimeEntry(wl, jt)
 		var err error
-		if !update {
-			results = append(results, JiraToggl{timeEntry: te, jira: subtask, worklog: wl})
-		}
-
+		jt.TimeEntry = te
+		jt.Update = update
 		dryRun , _ := cmd.Flags().GetBool("dry-run")
 		if te.Id == 0 {
 			if !dryRun {
 				fmt.Printf("updating %+v\n", te)
-				te, err = w.tc.TimeentryClient.Create(te)
+				te, err = w.tc.TimeentryClient.Create(jt.TimeEntry)
 			}
 		} else {
 			if !dryRun {
 				fmt.Printf("updating %+v\n", te)
-				te, err = w.tc.TimeentryClient.Update(te)
+				te, err = w.tc.TimeentryClient.Update(jt.TimeEntry)
 			}
 		}
+		jt.TimeEntry = te
 		if err != nil {
 			panic(err)
 		}
-		results = append(results, JiraToggl{timeEntry: te, jira:subtask, worklog:wl})
 	}
-	return results
 }
 
 func (w *Worker) getTogglProject(issue *jira.Issue) *gproject.Project {
@@ -213,11 +225,11 @@ func (w *Worker) getEpic(issue *jira.Issue) *jira.Issue {
 	return i
 }
 
-func (w *Worker) getTimeEntry(wl *jira.Worklog, issue *jira.Issue, subtask *jira.Issue) (*gtimeentry.TimeEntry, bool) {
+func (w *Worker) getTimeEntry(wl *jira.Worklog, jt *JiraToggl) (*gtimeentry.TimeEntry, bool) {
 	tc := w.tc
 	found := strings.Contains(wl.Comment, "-----tid:")
 	if !found {
-		return w.addNew(wl, issue, subtask), true
+		return w.addNew(wl, jt.Story, jt.Subtask), true
 	}
 	for _, c := range strings.Split(wl.Comment, "\n") {
 		if !strings.Contains(wl.Comment, "-----tid:") {
@@ -242,7 +254,7 @@ func (w *Worker) getTimeEntry(wl *jira.Worklog, issue *jira.Issue, subtask *jira
 		}
 
 		if update {
-			te = w.addNew(wl, issue, subtask)
+			te = w.addNew(wl, jt.Story, jt.Subtask)
 			te.Id = id
 		}
 		return te, update
