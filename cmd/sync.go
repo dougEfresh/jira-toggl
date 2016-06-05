@@ -50,10 +50,12 @@ type JiraToggl struct {
 	Subtask *jira.Issue
 	TimeEntry []*gtimeentry.TimeEntry
 	Epic *jira.Issue
-	Worklogs []*jira.Worklog
+	Worklogs []jira.WorklogRecord
 	DefaultProject *gproject.Project
 	Update bool
 }
+
+var debug bool = false
 
 func run(cmd *cobra.Command, args []string) {
 	debug , _ := cmd.Flags().GetBool("debug")
@@ -63,8 +65,7 @@ func run(cmd *cobra.Command, args []string) {
 	if err != nil {
 		panic(err)
 	}
-	logger := Debugger{Debug: debug}
-	tc, err := gtoggl.NewClient(viper.GetString("jira-toggl.toggl.token"), ghttp.SetTraceLogger(logger))
+	tc, err := gtoggl.NewClient(viper.GetString("jira-toggl.toggl.token"), ghttp.SetTraceLogger(Debugger{Debug: debug}), ghttp.SetInfoLogger(Debugger{Debug: true}), ghttp.SetErrorLogger(Debugger{Debug: true}) )
 	if err != nil {
 		panic(err)
 	}
@@ -79,15 +80,12 @@ func run(cmd *cobra.Command, args []string) {
 	}
 
 	w := &Worker{user: viper.GetString("jira-toggl.jira.user"), jc: jc, tc: tc, debug: false, workspace: viper.GetString("jira-toggl.toggl.workspace")}
-	sr, err := jc.Issue.Search(viper.GetString("jira-toggl.jira.jql"))
+	sr, _, err := jc.Issue.Search(viper.GetString("jira-toggl.jira.jql"))
 	if err != nil {
 		panic(err)
 	}
 	results := make([]*JiraToggl, 20, 100)
-	for _, value := range sr.Issues {
-		if value == nil {
-			continue
-		}
+	for _, value := range sr {
 		is, _, err := jc.Issue.Get(value.Key)
 		if err != nil {
 			panic(err)
@@ -99,19 +97,19 @@ func run(cmd *cobra.Command, args []string) {
 			Subtask: is,
 			Story: is,
 			DefaultProject: p,
-			Worklogs:  is.Fields.WorklogPage.Worklogs,
+			Worklogs:  is.Fields.Worklog.Worklogs,
 			TimeEntry: make([]*gtimeentry.TimeEntry, 20, 100),
 		}
 		w.processIssue(process,cmd)
 		results = append(results,process)
-		for _, value := range is.Fields.SubTasks {
+		for _, value := range is.Fields.Subtasks {
 			st, _, _ := jc.Issue.Get(value.Key)
 			process = &JiraToggl{
 				Epic: epic,
 				Subtask: st,
 				Story: is,
 				DefaultProject: p,
-				Worklogs:  st.Fields.WorklogPage.Worklogs,
+				Worklogs:  st.Fields.Worklog.Worklogs,
 				TimeEntry: make([]*gtimeentry.TimeEntry, 20, 100),
 			}
 			w.processIssue(process,cmd)
@@ -125,13 +123,16 @@ func run(cmd *cobra.Command, args []string) {
 			table := tablewriter.NewWriter(os.Stdout)
 			table.SetHeader([]string{value.Subtask.Key, value.Subtask.Fields.Summary})
 			p := false
+			total := uint64(0)
 			for _, te := range value.TimeEntry {
 				if te != nil {
 					p = true
-					table.Append([]string{te.Start.Format("Mon 02th"), strconv.FormatFloat(float64(te.Duration), 'f', 2, 64)})
+					table.Append([]string{te.Start.Format("Mon 02th"), strconv.FormatFloat(float64(te.Duration)/float64(60)/float64(60), 'f', 2, 64)})
+					total = total + te.Duration
 				}
 			}
 			if p {
+				table.SetFooter([]string{"",strconv.FormatUint(total/60/60,10)})
 				table.Render()
 			}
 		}
@@ -149,7 +150,7 @@ type Debugger struct {
 
 func (d Debugger) Printf(format string, v ...interface{}) {
 	if d.Debug {
-		fmt.Printf(format, v)
+		fmt.Printf(format, v...)
 	}
 }
 
@@ -164,19 +165,18 @@ type Worker struct {
 
 func (w *Worker) processIssue(jt *JiraToggl,cmd *cobra.Command) {
 
-
 	for _, wl := range jt.Worklogs {
 		if !strings.Contains(wl.Author.Name, w.user) {
 			continue
 		}
-		fmt.Printf("-----Processing %s %s -------\n", jt.Subtask.Key, jt.Subtask.Fields.Summary)
-		te, update := w.getTimeEntry(wl, jt)
+		fmt.Printf("-----Processing %s %s %s -------\n", jt.Subtask.Key, jt.Subtask.Fields.Summary, time.Time(wl.Started).Format(time.RFC3339))
+		te, update := w.getTimeEntry(&wl, jt)
 		var err error
 
 		jt.Update = update
 		if !update {
 			jt.TimeEntry = append(jt.TimeEntry,te)
-			return
+			continue
 		}
 		dryRun , _ := cmd.Flags().GetBool("dry-run")
 		if te.Id == 0 {
@@ -235,7 +235,7 @@ func (w *Worker) getEpic(issue *jira.Issue) *jira.Issue {
 	return i
 }
 
-func (w *Worker) getTimeEntry(wl *jira.Worklog, jt *JiraToggl) (*gtimeentry.TimeEntry, bool) {
+func (w *Worker) getTimeEntry(wl *jira.WorklogRecord, jt *JiraToggl) (*gtimeentry.TimeEntry, bool) {
 	tc := w.tc
 	found := strings.Contains(wl.Comment, "-----tid:")
 	if !found {
@@ -255,8 +255,8 @@ func (w *Worker) getTimeEntry(wl *jira.Worklog, jt *JiraToggl) (*gtimeentry.Time
 			panic(err)
 		}
 		update := false
-		if wl.TimeSpentSeconds != te.Duration {
-			te.Duration = wl.TimeSpentSeconds
+		if wl.TimeSpentSeconds != int(te.Duration) {
+			te.Duration = uint64(wl.TimeSpentSeconds)
 			fmt.Printf("Duration is differ %s,%s\n",te.Duration, wl.TimeSpentSeconds)
 			update = true
 		}
@@ -275,11 +275,11 @@ func (w *Worker) getTimeEntry(wl *jira.Worklog, jt *JiraToggl) (*gtimeentry.Time
 	return nil, false
 }
 
-func (w *Worker) addNew(wl *jira.Worklog, jt *JiraToggl) *gtimeentry.TimeEntry {
+func (w *Worker) addNew(wl *jira.WorklogRecord, jt *JiraToggl) *gtimeentry.TimeEntry {
 	i := gtimeentry.TimeEntry{}
 	i.Start = time.Time(wl.Started)
 	i.Stop = i.Start.Add(time.Duration(wl.TimeSpentSeconds) * time.Second)
-	i.Duration = wl.TimeSpentSeconds
+	i.Duration = uint64(wl.TimeSpentSeconds)
 	p := w.getTogglProject(jt.Subtask)
 	if p == nil {
 		p = w.getTogglProject(jt.Story)
@@ -313,17 +313,16 @@ type BasicClient struct {
 }
 
 func (c *BasicClient) RoundTrip(req *http.Request) (*http.Response, error) {
-
-	_, err := httputil.DumpRequest(req, true)
+	out, err := httputil.DumpRequest(req, true)
 	if err == nil {
 		if c.debug {
-			//fmt.Printf("%s\n", string(out))
+			fmt.Printf("%s\n", string(out))
 		}
 	}
 	r, err := http.DefaultTransport.RoundTrip(req)
-	_, _ = httputil.DumpResponse(r, true)
+	out, _ = httputil.DumpResponse(r, true)
 	if c.debug {
-		//fmt.Printf("%s\n", string(out))
+		fmt.Printf("%s\n", string(out))
 	}
 	return r, err
 
